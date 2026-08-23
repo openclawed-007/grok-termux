@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Installed as $PREFIX/bin/grok, $PREFIX/bin/agent, and grok-termux.
+set -euo pipefail
+GT_HOME="${GROK_TERMUX_HOME:-${HOME}/.grok/termux}"
+# shellcheck disable=SC1091
+. "${GT_HOME}/grok-termux.sh"
+gt_dispatch "$0" "$@"
