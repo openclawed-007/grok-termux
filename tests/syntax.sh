@@ -56,4 +56,15 @@ else
   fail=1
 fi
 
+old_preload="${LD_PRELOAD-}"
+export LD_PRELOAD=/tmp/fake-termux-exec.so
+gt_env_prep
+if [ "${LD_PRELOAD}" = "/tmp/fake-termux-exec.so" ]; then
+  printf 'ok  gt_env_prep preserves LD_PRELOAD\n'
+else
+  printf 'FAIL gt_env_prep clobbered LD_PRELOAD (%s)\n' "${LD_PRELOAD-}"
+  fail=1
+fi
+if [ -n "$old_preload" ]; then export LD_PRELOAD="$old_preload"; else unset LD_PRELOAD; fi
+
 exit "$fail"

@@ -4,16 +4,17 @@ Run [xAI Grok Build](https://github.com/xai-org/grok-build) on Termux.
 
 Official `grok` is a static musl Linux binary. xAI does not support Android. On stock Termux the installer usually dies with `downloaded grok failed to run`, and even when the ELF loads, musl reads `/etc/resolv.conf` which Termux cannot provide.
 
-This wrapper downloads the **official** `linux-aarch64` / `linux-x86_64` binary and keeps trying until something actually execs:
+This wrapper downloads the **official** `linux-aarch64` / `linux-x86_64` musl binary and runs it **natively** (no proot, no qemu) whenever the kernel will load it.
 
-| Order | Backend | What it fixes | Extra packages |
-|------|---------|----------------|----------------|
-| 1 | **native** | DNS, via a 16-byte in-place patch `/etc/resolv.conf` → `/sdcard/.grokdns` | python |
-| 2 | **proot-lite** | DNS without patching (bind-mounts a tiny rootfs). Still the official binary. | `proot` |
-| 3 | **qemu** | Kernel will not load the ELF (non-PIE, 16 KiB page size, exec format error) | `qemu-user-aarch64` |
-| 4 | **distro** | Last resort: official binary inside Ubuntu via `proot-distro` | `proot-distro` + Ubuntu |
+The official aarch64 build is static ET_EXEC with **64 KiB** LOAD alignment, so 16 KiB Android pages are fine. What actually breaks on Termux is DNS: musl opens `/etc/resolv.conf`, which does not exist. The installer patches that 16-byte path to `/sdcard/.grokdns` **before** the first `--version` probe, copies the binary into `$PREFIX/libexec` (always executable), and never unsets Termux `LD_PRELOAD` in the installer shell.
 
-No root required. Native is preferred. Proot is only used when native cannot work.
+| Order | Backend | When it is used |
+|------|---------|-----------------|
+| 1 | **native** | Default. Official binary + DNS patch. |
+| 2 | **qemu** | Only if the kernel refuses the ELF (`Exec format error`). |
+| 3 | **distro** | Last resort: existing or new `proot-distro` Ubuntu. |
+
+No root required. Grant storage when `termux-setup-storage` asks — that is what makes `/sdcard/.grokdns` writable.
 
 Unofficial. Not affiliated with xAI. The `grok` binary is theirs; this repo is the Termux glue.
 

@@ -26,6 +26,9 @@ GT_CHANNEL="${GROK_CHANNEL:-stable}"
 GT_DISTRO="${GROK_TERMUX_DISTRO:-ubuntu}"
 GT_SDCARD_DNS="/sdcard/.grokdns"
 GT_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+GT_NATIVE_BIN="${GT_PREFIX}/libexec/grok-termux/grok"
+# termux-exec. Never unset this in the installer/launcher shell — it breaks pkg.
+GT_SAVED_PRELOAD="${LD_PRELOAD-}"
 
 gt_log()  { printf '\033[1;32m==>\033[0m %s\n' "$*" >&2; }
 gt_warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
@@ -77,7 +80,20 @@ gt_timeout() {
   fi
 }
 
+gt_restore_preload() {
+  if [ -n "${GT_SAVED_PRELOAD:-}" ]; then
+    export LD_PRELOAD="$GT_SAVED_PRELOAD"
+  else
+    unset LD_PRELOAD 2>/dev/null || true
+    # If Termux shipped a preload and we wiped it, put the usual one back.
+    if [ -f "${GT_PREFIX}/lib/libtermux-exec.so" ]; then
+      export LD_PRELOAD="${GT_PREFIX}/lib/libtermux-exec.so"
+    fi
+  fi
+}
+
 gt_pkg() {
+  gt_restore_preload
   gt_have_cmd pkg || gt_die "pkg not found — install Termux from F-Droid / GitHub, not Play Store"
   pkg install -y "$@" </dev/null
 }
@@ -185,19 +201,24 @@ gt_find_bin() {
 # --- exec helpers -----------------------------------------------------------
 
 gt_env_prep() {
-  unset LD_PRELOAD
+  # Export-only. Never unset LD_PRELOAD here (that is the parent shell).
   if gt_have_cmd termux-open-url; then
     export BROWSER="${BROWSER:-termux-open-url}"
   fi
-  # Keep grok off FAT/sdcard for its own state; HOME is Termux internal storage.
-  export HOME="${HOME}"
+}
+
+gt_install_native_bin() {
+  local src=$1
+  mkdir -p "$(dirname "$GT_NATIVE_BIN")"
+  cp -f "$src" "$GT_NATIVE_BIN"
+  chmod 755 "$GT_NATIVE_BIN"
 }
 
 gt_exec_native() {
   local argv0=$1 bin=$2
   shift 2
   gt_env_prep
-  exec -a "$(basename "$argv0")" "$bin" "$@"
+  LD_PRELOAD= exec -a "$(basename "$argv0")" "$bin" "$@"
 }
 
 gt_prepare_rootfs() {
@@ -230,7 +251,7 @@ gt_exec_proot_lite() {
   gt_have_cmd proot || gt_die "proot-lite backend selected but proot is not installed — re-run install.sh"
   gt_env_prep
   gt_proot_base
-  exec -a "$(basename "$argv0")" "${GT_PROOT_ARGS[@]}" "$bin" "$@"
+  LD_PRELOAD= exec -a "$(basename "$argv0")" "${GT_PROOT_ARGS[@]}" "$bin" "$@"
 }
 
 gt_exec_qemu() {
@@ -240,14 +261,13 @@ gt_exec_qemu() {
   gt_have_cmd "$q" || gt_die "qemu backend selected but $q is not installed — re-run install.sh"
   gt_env_prep
   if gt_have_system_resolv || gt_bin_patched_sdcard "$bin"; then
-    exec -a "$(basename "$argv0")" "$q" "$bin" "$@"
+    LD_PRELOAD= exec -a "$(basename "$argv0")" "$q" "$bin" "$@"
   fi
-  # musl still wants /etc/resolv.conf — wrap qemu in the mini rootfs.
   if gt_have_cmd proot; then
     gt_proot_base
-    exec -a "$(basename "$argv0")" "${GT_PROOT_ARGS[@]}" "$q" "$bin" "$@"
+    LD_PRELOAD= exec -a "$(basename "$argv0")" "${GT_PROOT_ARGS[@]}" "$q" "$bin" "$@"
   fi
-  exec -a "$(basename "$argv0")" "$q" "$bin" "$@"
+  LD_PRELOAD= exec -a "$(basename "$argv0")" "$q" "$bin" "$@"
 }
 
 gt_distro_binds() {
@@ -264,33 +284,65 @@ gt_exec_distro() {
   gt_have_cmd proot-distro || gt_die "distro backend selected but proot-distro is missing — re-run install.sh"
   gt_env_prep
   gt_distro_binds
-  exec proot-distro login "$GT_DISTRO" "${GT_DISTRO_BINDS[@]}" -- \
+  LD_PRELOAD= exec proot-distro login "$GT_DISTRO" "${GT_DISTRO_BINDS[@]}" -- \
     /bin/bash -c 'cd "$1" || exit 1; shift; exec "$@"' _ "$PWD" "$bin" "$@"
+}
+
+# Return 0 if the ELF loaded. --version may exit non-zero (DNS, first-run init)
+# after a successful exec; 126/127/137/139 mean it did not really run.
+gt_probe_loaded() {
+  local rc=$1 log=$2
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if grep -qiE '^[0-9]+\.[0-9]+\.[0-9]+|grok' "$log" 2>/dev/null; then
+    return 0
+  fi
+  case "$rc" in
+    126|127) return 1 ;;   # cannot exec / not found
+    132|135|139) return 1 ;; # SIGILL / SIGBUS / SIGSEGV
+    137) return 1 ;;         # SIGKILL (timeout or Android)
+  esac
+  # Other non-zero: binary started. Treat as native-capable.
+  return 0
 }
 
 gt_probe() {
   local kind=$1 bin=$2
-  local tmp rc=1
+  local tmp log rc=0 q
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/gt-probe.XXXXXX")"
+  log="${tmp}/out"
   gt_env_prep
+  chmod 755 "$bin" 2>/dev/null || true
   case "$kind" in
     native)
-      HOME="$tmp" gt_timeout 25 "$bin" --version </dev/null >/dev/null 2>&1 && rc=0
+      HOME="$tmp" gt_timeout 90 env -u LD_PRELOAD "$bin" --version </dev/null >"$log" 2>&1 || rc=$?
+      if gt_probe_loaded "$rc" "$log"; then
+        rm -rf "$tmp"
+        gt_restore_preload
+        return 0
+      fi
+      gt_warn "native probe exit=${rc} $(tr '\n' ' ' < "$log" | cut -c1-240)"
+      rc=1
       ;;
     proot-lite)
       gt_proot_base
-      HOME="$tmp" gt_timeout 35 "${GT_PROOT_ARGS[@]}" "$bin" --version </dev/null >/dev/null 2>&1 && rc=0
+      HOME="$tmp" gt_timeout 45 env -u LD_PRELOAD "${GT_PROOT_ARGS[@]}" "$bin" --version </dev/null >"$log" 2>&1 || rc=$?
+      gt_probe_loaded "$rc" "$log" && rc=0 || rc=1
       ;;
     qemu)
-      local q; q="$(gt_qemu_bin)"
-      HOME="$tmp" gt_timeout 60 "$q" "$bin" --version </dev/null >/dev/null 2>&1 && rc=0
+      q="$(gt_qemu_bin)"
+      HOME="$tmp" gt_timeout 90 env -u LD_PRELOAD "$q" "$bin" --version </dev/null >"$log" 2>&1 || rc=$?
+      gt_probe_loaded "$rc" "$log" && rc=0 || rc=1
       ;;
     distro)
       gt_distro_binds
       HOME="$tmp" gt_timeout 90 proot-distro login "$GT_DISTRO" "${GT_DISTRO_BINDS[@]}" -- \
-        /bin/bash -c 'exec "$1" --version' _ "$bin" </dev/null >/dev/null 2>&1 && rc=0
+        /bin/bash -c 'exec "$1" --version' _ "$bin" </dev/null >"$log" 2>&1 || rc=$?
+      gt_probe_loaded "$rc" "$log" && rc=0 || rc=1
       ;;
   esac
+  gt_restore_preload
   rm -rf "$tmp"
   return $rc
 }
@@ -397,27 +449,54 @@ gt_ensure_proot() {
   gt_have_cmd proot
 }
 
-gt_ensure_distro() {
+gt_distro_installed() {
   local rootfs="${GT_PREFIX}/var/lib/proot-distro/installed-rootfs/${GT_DISTRO}"
+  [ -d "$rootfs" ] && return 0
+  proot-distro list 2>/dev/null | grep -qiE "(^|[[:space:]*]+)${GT_DISTRO}([[:space:]].*)?$" && return 0
+  return 1
+}
+
+gt_ensure_distro() {
+  gt_restore_preload
   gt_have_cmd proot-distro || { gt_log "installing proot-distro"; gt_pkg proot-distro; }
-  if [ ! -d "$rootfs" ]; then
-    gt_log "installing ${GT_DISTRO} via proot-distro (last-resort backend, several hundred MB)"
-    proot-distro install "$GT_DISTRO"
+  gt_have_cmd proot-distro || return 1
+  if gt_distro_installed; then
+    gt_log "using existing ${GT_DISTRO} container"
+    return 0
   fi
-  [ -d "$rootfs" ]
+  gt_log "installing ${GT_DISTRO} via proot-distro (last-resort backend, several hundred MB)"
+  if proot-distro install "$GT_DISTRO"; then
+    return 0
+  fi
+  # Newer CLI: "already exists" is not a failure for us.
+  gt_warn "proot-distro install reported an error — checking for an existing container"
+  gt_distro_installed
 }
 
 gt_pick_backend() {
-  local bin=$1 forced="${GROK_TERMUX_BACKEND:-}"
+  local bin=$1 native_bin forced="${GROK_TERMUX_BACKEND:-}"
+  gt_restore_preload
+
+  # DNS patch MUST happen before --version: musl reads /etc/resolv.conf on start.
+  gt_log "wiring native DNS"
+  gt_prepare_dns_native "$bin" || true
+  gt_install_native_bin "$bin"
+  native_bin="$GT_NATIVE_BIN"
+  [ -x "$native_bin" ] || native_bin="$bin"
+
   if [ -n "$forced" ]; then
     gt_log "backend forced: ${forced}"
     case "$forced" in
       native|proot-lite|qemu|distro) GT_BACKEND="$forced" ;;
       *) gt_die "unknown GROK_TERMUX_BACKEND=$forced" ;;
     esac
-    # still try to make it actually runnable
     case "$GT_BACKEND" in
-      native) gt_prepare_dns_native "$bin" || gt_die "native backend requested but DNS cannot be wired" ;;
+      native)
+        if gt_probe native "$native_bin" || gt_probe native "$bin"; then
+          return 0
+        fi
+        gt_die "native backend requested but the official ELF would not load"
+        ;;
       proot-lite) gt_ensure_proot || gt_die "proot-lite requested but proot failed to install" ;;
       qemu) gt_ensure_qemu || gt_die "qemu requested but qemu failed to install" ;;
       distro) gt_ensure_distro || gt_die "distro requested but ${GT_DISTRO} failed to install" ;;
@@ -428,28 +507,17 @@ gt_pick_backend() {
     gt_die "forced backend ${GT_BACKEND} could not exec grok --version"
   fi
 
-  gt_log "probing native exec"
-  if gt_probe native "$bin"; then
-    if gt_prepare_dns_native "$bin"; then
-      GT_BACKEND=native
-      gt_log "backend: native (no proot)"
-      return 0
-    fi
-    if gt_ensure_proot && gt_probe proot-lite "$bin"; then
-      GT_BACKEND=proot-lite
-      gt_log "backend: proot-lite (DNS bind, still the official binary)"
-      return 0
-    fi
+  gt_log "probing native exec (official musl binary, no proot)"
+  if gt_probe native "$native_bin" || gt_probe native "$bin"; then
     GT_BACKEND=native
-    gt_warn "native exec works but DNS is unpatched — network calls may fail"
+    gt_log "backend: native (no proot, no qemu)"
     return 0
   fi
 
-  gt_warn "native exec failed (common on 16 KiB-page devices / non-PIE ELF)"
+  gt_warn "native ELF did not load (not a page-size issue — this build is 64KiB-aligned ET_EXEC)"
 
   if gt_ensure_qemu; then
     gt_log "probing qemu-user"
-    gt_prepare_dns_native "$bin" || true
     if gt_probe qemu "$bin"; then
       GT_BACKEND=qemu
       gt_log "backend: qemu-user"
@@ -465,7 +533,7 @@ gt_pick_backend() {
     return 0
   fi
 
-  gt_die "every backend failed. Install Termux from F-Droid, run termux-setup-storage, then re-run install.sh"
+  gt_die "every backend failed. Run: termux-setup-storage && curl -fsSL https://raw.githubusercontent.com/openclawed-007/grok-termux/main/install.sh | bash"
 }
 
 gt_install_wrappers() {
@@ -487,22 +555,17 @@ gt_launch() {
   gt_load_state
   bin="$(gt_find_bin)" || gt_die "no grok binary in ${GT_VERSIONS} — run install.sh"
   backend="${GT_BACKEND:-native}"
+  if [ "$backend" = native ] && [ -x "$GT_NATIVE_BIN" ]; then
+    bin="$GT_NATIVE_BIN"
+  fi
 
-  # Prefer a live system resolv if one appeared (Magisk module, etc.).
   if [ "$backend" = native ] || [ "$backend" = qemu ]; then
     if gt_have_system_resolv; then
       gt_dns "$bin" native >/dev/null 2>&1 || true
     else
       if gt_sdcard_writable; then
         gt_seed_resolv "$GT_SDCARD_DNS"
-        if ! gt_dns "$bin" sdcard >/dev/null 2>&1; then
-          # unpatchable build: fall through to proot-lite when available
-          if gt_have_cmd proot && [ "$backend" = native ]; then
-            backend=proot-lite
-          fi
-        fi
-      elif gt_have_cmd proot && [ "$backend" = native ]; then
-        backend=proot-lite
+        gt_dns "$bin" sdcard >/dev/null 2>&1 || true
       fi
     fi
   fi
