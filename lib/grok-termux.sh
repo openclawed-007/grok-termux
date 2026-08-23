@@ -215,10 +215,19 @@ gt_install_native_bin() {
 }
 
 gt_exec_native() {
-  local argv0=$1 bin=$2
+  local argv0=$1 bin=$2 envbin
   shift 2
   gt_env_prep
-  LD_PRELOAD= exec -a "$(basename "$argv0")" "$bin" "$@"
+  # termux-exec is already mapped into THIS bash. Unsetting LD_PRELOAD does not
+  # unhook execve. A direct `exec grok` is intercepted and handed to bionic
+  # linker64, which rejects static ET_EXEC (e_type 2):
+  #   error: ".../grok" has unexpected e_type: 2
+  # Trampoline through env(1) so the process that execve's grok has no hook;
+  # the kernel then loads the musl ELF itself (same path as the --version probe).
+  envbin="${GT_PREFIX}/bin/env"
+  [ -x "$envbin" ] || envbin="$(command -v env || true)"
+  [ -n "$envbin" ] || gt_die "env not found; cannot bypass termux-exec"
+  exec "$envbin" -u LD_PRELOAD "$bin" "$@"
 }
 
 gt_prepare_rootfs() {
