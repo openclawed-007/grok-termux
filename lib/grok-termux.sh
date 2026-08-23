@@ -27,10 +27,15 @@ GT_DISTRO="${GROK_TERMUX_DISTRO:-ubuntu}"
 GT_SDCARD_DNS="/sdcard/.grokdns"
 GT_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
-gt_log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
+gt_log()  { printf '\033[1;32m==>\033[0m %s\n' "$*" >&2; }
 gt_warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
 gt_die()  { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; exit 1; }
 gt_debug() { [ -n "${GROK_TERMUX_DEBUG:-}" ] && printf '\033[1;34m==>\033[0m %s\n' "$*" >&2 || true; }
+
+# Isolate X.Y.Z from mixed stdout (logs, CRLF, channel-file noise).
+gt_parse_version() {
+  printf '%s' "$1" | tr -d '\r' | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._]+)?' | head -1 || true
+}
 
 gt_is_termux() {
   [ -n "${PREFIX:-}" ] && [ -d "${PREFIX}/bin" ] || return 1
@@ -295,8 +300,9 @@ gt_probe() {
 gt_fetch_version() {
   local v raw
   if [ -n "${1:-}" ]; then
-    printf '%s' "$1" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+' || gt_die "bad version: $1"
-    printf '%s\n' "$1"
+    v="$(gt_parse_version "$1")"
+    [ -n "$v" ] || gt_die "bad version: $1"
+    printf '%s\n' "$v"
     return
   fi
   gt_log "resolving latest ${GT_CHANNEL} version"
@@ -305,17 +311,20 @@ gt_fetch_version() {
     gt_warn "${GT_PRIMARY} unreachable, trying GCS"
     raw="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 20 "${GT_FALLBACK}/${GT_CHANNEL}" 2>/dev/null || true)"
   fi
-  v="$(printf '%s' "$raw" | tr -d '\r' | head -n1 | tr -d '[:space:]')"
-  printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+' || gt_die "could not resolve latest ${GT_CHANNEL} version"
+  v="$(gt_parse_version "$raw")"
+  [ -n "$v" ] || gt_die "could not resolve latest ${GT_CHANNEL} version"
   printf '%s\n' "$v"
 }
 
 gt_download_binary() {
-  local version=$1 platform=$2
-  local tmp dest url
+  local version platform tmp dest url
+  version="$(gt_parse_version "$1")"
+  platform=$2
+  [ -n "$version" ] || gt_die "refusing to download: version is empty or malformed ($1)"
+  [ -n "$platform" ] || gt_die "refusing to download: missing platform"
   dest="${GT_VERSIONS}/${version}"
   tmp="${dest}.tmp.$$"
-  mkdir -p "$GT_VERSIONS" "$GT_DOWNLOADS"
+  mkdir -p "$GT_VERSIONS" "$GT_DOWNLOADS" "$(dirname "$GT_OFFICIAL_BIN")"
   gt_log "downloading grok ${version} (${platform})"
   url="${GT_PRIMARY}/grok-${version}-${platform}"
   if ! curl -fL --retry 3 --retry-delay 2 --max-time 600 -o "$tmp" "$url"; then

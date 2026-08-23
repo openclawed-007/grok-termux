@@ -33,4 +33,27 @@ assert len("/sdcard/.grokdns") == 16
 print("ok  dns path lengths")
 PY
 
+# Logs must not leak into command substitutions (that built grok-==> URLs).
+log_out="$(gt_log "hello-log" 2>/dev/null || true)"
+if [ -z "$log_out" ]; then
+  printf 'ok  gt_log goes to stderr\n'
+else
+  printf 'FAIL gt_log leaked to stdout: %s\n' "$log_out"
+  fail=1
+fi
+ver="$(gt_fetch_version 1.0.5)"
+if [ "$ver" = "1.0.5" ]; then
+  printf 'ok  gt_fetch_version stdout is the version only\n'
+else
+  printf 'FAIL gt_fetch_version stdout=%s\n' "$ver"
+  fail=1
+fi
+parsed="$(gt_parse_version $'==> resolving latest stable version\n1.0.5\n')"
+if [ "$parsed" = "1.0.5" ]; then
+  printf 'ok  gt_parse_version strips log noise\n'
+else
+  printf 'FAIL gt_parse_version=%s\n' "$parsed"
+  fail=1
+fi
+
 exit "$fail"

@@ -94,6 +94,8 @@ case "$PINNED" in
   --*) gt_die "unknown flag: $PINNED (try install.sh --help)" ;;
 esac
 GT_VERSION="$(gt_fetch_version "$PINNED")"
+GT_VERSION="$(gt_parse_version "$GT_VERSION")"
+[ -n "$GT_VERSION" ] || gt_die "could not parse grok version"
 gt_log "version ${GT_VERSION}  platform ${GT_PLATFORM}  channel ${GT_CHANNEL}"
 
 bin="$(gt_download_binary "$GT_VERSION" "$GT_PLATFORM")"
