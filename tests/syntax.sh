@@ -67,4 +67,31 @@ else
 fi
 if [ -n "$old_preload" ]; then export LD_PRELOAD="$old_preload"; else unset LD_PRELOAD; fi
 
+# Probe must not treat bionic linker errors as success (path contains "grok").
+fake="$(mktemp)"
+printf '%s\n' 'error: "/data/data/com.termux/files/usr/libexec/grok-termux/grok" has unexpected e_type: 2' > "$fake"
+if gt_probe_loaded 1 "$fake"; then
+  printf 'FAIL gt_probe_loaded treated e_type error as success\n'
+  fail=1
+else
+  printf 'ok  gt_probe_loaded rejects e_type error\n'
+fi
+printf '%s\n' 'grok 1.0.5' > "$fake"
+if gt_probe_loaded 0 "$fake"; then
+  printf 'ok  gt_probe_loaded accepts a real version line\n'
+else
+  printf 'FAIL gt_probe_loaded rejected version output\n'
+  fail=1
+fi
+rm -f "$fake"
+
+python3 -m py_compile "${ROOT}/lib/grok-exec.py"
+printf 'ok  grok-exec.py compiles\n'
+if python3 "${ROOT}/lib/grok-exec.py" /bin/true; then
+  printf 'ok  grok-exec.py SYS_execve /bin/true\n'
+else
+  printf 'FAIL grok-exec.py could not exec /bin/true\n'
+  fail=1
+fi
+
 exit "$fail"

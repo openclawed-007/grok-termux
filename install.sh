@@ -7,7 +7,7 @@
 set -euo pipefail
 
 RAW="${GROK_TERMUX_RAW:-https://raw.githubusercontent.com/openclawed-007/grok-termux/main}"
-FILES=(install.sh lib/grok-termux.sh lib/grok-dns.py bin/grok-launch uninstall.sh)
+FILES=(install.sh lib/grok-termux.sh lib/grok-dns.py lib/grok-exec.py bin/grok-launch uninstall.sh)
 
 gt_bootstrap_die() { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -54,11 +54,12 @@ fi
 
 cp -f "${SRC}/lib/grok-termux.sh" "${GT_HOME}/grok-termux.sh"
 cp -f "${SRC}/lib/grok-dns.py" "${GT_HOME}/grok-dns.py"
+cp -f "${SRC}/lib/grok-exec.py" "${GT_HOME}/grok-exec.py"
 cp -f "${SRC}/bin/grok-launch" "${GT_HOME}/grok-launch"
 cp -f "${SRC}/uninstall.sh" "${GT_HOME}/uninstall.sh"
 cp -f "${SRC}/install.sh" "${GT_HOME}/install.sh" 2>/dev/null || true
 chmod 755 "${GT_HOME}/grok-launch" "${GT_HOME}/uninstall.sh" "${GT_HOME}/install.sh" \
-  "${GT_HOME}/grok-dns.py" 2>/dev/null || true
+  "${GT_HOME}/grok-dns.py" "${GT_HOME}/grok-exec.py" 2>/dev/null || true
 
 # shellcheck disable=SC1091
 . "${GT_HOME}/grok-termux.sh"

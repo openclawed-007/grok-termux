@@ -20,6 +20,7 @@ GT_VERSIONS="${HOME}/.grok/versions"
 GT_DOWNLOADS="${HOME}/.grok/downloads"
 GT_OFFICIAL_BIN="${HOME}/.grok/bin/grok"
 GT_DNS_PY="${GT_HOME}/grok-dns.py"
+GT_EXEC_PY="${GT_HOME}/grok-exec.py"
 GT_PRIMARY="${GROK_TERMUX_PRIMARY:-https://x.ai/cli}"
 GT_FALLBACK="${GROK_TERMUX_FALLBACK:-https://storage.googleapis.com/grok-build-public-artifacts/cli}"
 GT_CHANNEL="${GROK_CHANNEL:-stable}"
@@ -215,19 +216,15 @@ gt_install_native_bin() {
 }
 
 gt_exec_native() {
-  local argv0=$1 bin=$2 envbin
+  local argv0=$1 bin=$2
   shift 2
   gt_env_prep
-  # termux-exec is already mapped into THIS bash. Unsetting LD_PRELOAD does not
-  # unhook execve. A direct `exec grok` is intercepted and handed to bionic
-  # linker64, which rejects static ET_EXEC (e_type 2):
+  [ -f "$GT_EXEC_PY" ] || gt_die "missing $GT_EXEC_PY — re-run install.sh"
+  # termux-exec wraps libc execve in this process (and in env/python children
+  # started with LD_PRELOAD still set). linker64 then rejects ET_EXEC:
   #   error: ".../grok" has unexpected e_type: 2
-  # Trampoline through env(1) so the process that execve's grok has no hook;
-  # the kernel then loads the musl ELF itself (same path as the --version probe).
-  envbin="${GT_PREFIX}/bin/env"
-  [ -x "$envbin" ] || envbin="$(command -v env || true)"
-  [ -n "$envbin" ] || gt_die "env not found; cannot bypass termux-exec"
-  exec "$envbin" -u LD_PRELOAD "$bin" "$@"
+  # grok-exec.py issues SYS_execve directly so the kernel loads the musl ELF.
+  exec python3 "$GT_EXEC_PY" "$bin" "$@"
 }
 
 gt_prepare_rootfs() {
@@ -297,23 +294,17 @@ gt_exec_distro() {
     /bin/bash -c 'cd "$1" || exit 1; shift; exec "$@"' _ "$PWD" "$bin" "$@"
 }
 
-# Return 0 if the ELF loaded. --version may exit non-zero (DNS, first-run init)
-# after a successful exec; 126/127/137/139 mean it did not really run.
+# Return 0 only if grok actually started. Do not match the word "grok" in
+# linker errors like: error: ".../grok-termux/grok" has unexpected e_type: 2
 gt_probe_loaded() {
   local rc=$1 log=$2
-  if [ "$rc" -eq 0 ]; then
+  if grep -qiE 'unexpected e_type|exec format error|bad ELF|No such file' "$log" 2>/dev/null; then
+    return 1
+  fi
+  if grep -qE '(^|[[:space:]])[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?([[:space:]]|$)' "$log" 2>/dev/null; then
     return 0
   fi
-  if grep -qiE '^[0-9]+\.[0-9]+\.[0-9]+|grok' "$log" 2>/dev/null; then
-    return 0
-  fi
-  case "$rc" in
-    126|127) return 1 ;;   # cannot exec / not found
-    132|135|139) return 1 ;; # SIGILL / SIGBUS / SIGSEGV
-    137) return 1 ;;         # SIGKILL (timeout or Android)
-  esac
-  # Other non-zero: binary started. Treat as native-capable.
-  return 0
+  [ "$rc" -eq 0 ]
 }
 
 gt_probe() {
@@ -325,7 +316,7 @@ gt_probe() {
   chmod 755 "$bin" 2>/dev/null || true
   case "$kind" in
     native)
-      HOME="$tmp" gt_timeout 90 env -u LD_PRELOAD "$bin" --version </dev/null >"$log" 2>&1 || rc=$?
+      HOME="$tmp" gt_timeout 90 python3 "$GT_EXEC_PY" "$bin" --version </dev/null >"$log" 2>&1 || rc=$?
       if gt_probe_loaded "$rc" "$log"; then
         rm -rf "$tmp"
         gt_restore_preload
@@ -386,6 +377,16 @@ gt_download_binary() {
   dest="${GT_VERSIONS}/${version}"
   tmp="${dest}.tmp.$$"
   mkdir -p "$GT_VERSIONS" "$GT_DOWNLOADS" "$(dirname "$GT_OFFICIAL_BIN")"
+  if [ -z "${GROK_TERMUX_FORCE_DOWNLOAD:-}" ] && [ -f "$dest" ]; then
+    sz="$(wc -c < "$dest" | tr -d ' ')"
+    if [ "$sz" -gt 80000000 ]; then
+      gt_log "reusing existing grok ${version} (${sz} bytes)"
+      chmod 755 "$dest"
+      printf '%s\n' "$version" > "${GT_VERSIONS}/.verified"
+      printf '%s\n' "$dest"
+      return 0
+    fi
+  fi
   gt_log "downloading grok ${version} (${platform})"
   url="${GT_PRIMARY}/grok-${version}-${platform}"
   if ! curl -fL --retry 3 --retry-delay 2 --max-time 600 -o "$tmp" "$url"; then

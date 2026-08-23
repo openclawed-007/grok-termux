@@ -16,7 +16,7 @@ The official aarch64 build is static ET_EXEC with **64 KiB** LOAD alignment, so 
 
 No root required. Grant storage when `termux-setup-storage` asks — that is what makes `/sdcard/.grokdns` writable.
 
-The launcher never `exec`s the grok ELF from bash. Termux’s `LD_PRELOAD` (`termux-exec`) intercepts `execve` in the already-running shell and feeds the file to Android `linker64`, which only accepts PIE (`ET_DYN`) and errors with `unexpected e_type: 2` on the official static binary. Launch goes through `env -u LD_PRELOAD` so the kernel loads it.
+Termux `termux-exec` (`LD_PRELOAD`) wraps libc `execve` in every child started from bash — even `env -u LD_PRELOAD`, because the hook is already mapped in. That feeds the official static ELF to Android `linker64`, which only accepts PIE and errors with `unexpected e_type: 2`. The launcher calls `grok-exec.py`, which issues a raw `SYS_execve` so the kernel loads the musl binary itself.
 
 Unofficial. Not affiliated with xAI. The `grok` binary is theirs; this repo is the Termux glue.
 
